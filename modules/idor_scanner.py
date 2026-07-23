@@ -16,10 +16,21 @@ class IDORScanner:
     ID_PARAM_NAMES = ["id", "user_id", "uid", "account_id", "record_id",
                        "order_id", "invoice_id", "profile_id"]
 
-    def __init__(self, session, base_url="http://127.0.0.1"):
+    def __init__(self, session, base_url="http://127.0.0.1", config=None):
         self.session = session
         self.base_url = base_url.rstrip("/")
+        self.config = config
         self.findings = []
+
+        if config is not None and config.idor_direct_url:
+            self.direct_url = config.full_url(config.idor_direct_url)
+            self.direct_param = config.idor_direct_param
+            self.direct_id_range = config.idor_id_range
+        else:
+            # Backward-compatible DVWA default
+            self.direct_url = f"{self.base_url}/vulnerabilities/sqli/"
+            self.direct_param = "id"
+            self.direct_id_range = ["1", "2", "3", "4", "5"]
 
     def looks_like_id(self, param_name, param_value):
         name = param_name.lower()
@@ -148,32 +159,36 @@ class IDORScanner:
                     else:
                         print(f"{Fore.GREEN}[+] No IDOR detected on '{param_name}' in {url}")
 
-        # Also test DVWA's SQLi page directly — it uses ?id= param
-        # which is a classic IDOR test target
-        print(f"\n{Fore.BLUE}[*] Testing DVWA SQLi page ID parameter directly...")
-        for test_id in ["1", "2", "3", "4", "5"]:
-            try:
-                resp = self.session.get(
-                    f"{self.base_url}/vulnerabilities/sqli/",
-                    params={"id": test_id, "Submit": "Submit"},
-                    timeout=10
-                )
-                soup = BeautifulSoup(resp.text, "html.parser")
-                pre = soup.find("pre")
-                if pre:
-                    content = pre.get_text(strip=True)
-                    if content:
-                        print(f"{Fore.RED}[!] ID={test_id} returns data: {content[:80]}")
-                        self.findings.append({
-                            "type":      "IDOR",
-                            "severity":  "HIGH",
-                            "url":       f"{self.base_url}/vulnerabilities/sqli/",
-                            "parameter": "id",
-                            "method":    "get",
-                            "evidence":  f"Authenticated user can access any user's record by changing id={test_id} — no ownership check: {content[:80]}"
-                        })
-            except requests.exceptions.RequestException:
-                continue
+        # Also test the configured "known good" direct-enumeration target
+        # (defaults to DVWA's SQLi page, which uses ?id= as a classic
+        # IDOR test target). Skipped entirely if no such target is
+        # configured for this target.
+        if self.direct_url and self.direct_id_range:
+            print(f"\n{Fore.BLUE}[*] Testing {self.direct_url} "
+                  f"'{self.direct_param}' parameter directly...")
+            for test_id in self.direct_id_range:
+                try:
+                    resp = self.session.get(
+                        self.direct_url,
+                        params={self.direct_param: test_id, "Submit": "Submit"},
+                        timeout=10
+                    )
+                    soup = BeautifulSoup(resp.text, "html.parser")
+                    pre = soup.find("pre")
+                    if pre:
+                        content = pre.get_text(strip=True)
+                        if content:
+                            print(f"{Fore.RED}[!] {self.direct_param}={test_id} returns data: {content[:80]}")
+                            self.findings.append({
+                                "type":      "IDOR",
+                                "severity":  "HIGH",
+                                "url":       self.direct_url,
+                                "parameter": self.direct_param,
+                                "method":    "get",
+                                "evidence":  f"Authenticated user can access any user's record by changing {self.direct_param}={test_id} — no ownership check: {content[:80]}"
+                            })
+                except requests.exceptions.RequestException:
+                    continue
 
         if not self.findings:
             print(f"{Fore.YELLOW}[?] No clear IDOR findings from form parameters")

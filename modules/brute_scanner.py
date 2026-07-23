@@ -20,13 +20,23 @@ class BruteForceScanner:
         "toor", "iloveyou", "password123", "password"
     ]
 
-    SUCCESS_INDICATOR = "Welcome to the password protected area"
-    FAILURE_INDICATOR = "Username and/or password incorrect"
-
-    def __init__(self, session, base_url="http://127.0.0.1"):
+    def __init__(self, session, base_url="http://127.0.0.1", config=None):
         self.session = session
         self.base_url = base_url.rstrip("/")
+        self.config = config
         self.findings = []
+
+        if config is not None:
+            self.brute_url = config.full_url(config.brute_url)
+            self.username_field = config.brute_username_field
+            self.password_field = config.brute_password_field
+            self.success_indicator = config.brute_success_text
+        else:
+            # Backward-compatible DVWA defaults
+            self.brute_url = f"{self.base_url}/vulnerabilities/brute/"
+            self.username_field = "username"
+            self.password_field = "password"
+            self.success_indicator = "Welcome to the password protected area"
 
     def load_wordlist(self, wordlist_path=None):
         """
@@ -64,10 +74,10 @@ class BruteForceScanner:
         return words
 
     def attempt_login(self, username, password):
-        url = f"{self.base_url}/vulnerabilities/brute/"
+        url = self.brute_url
         params = {
-            "username": username,
-            "password": password,
+            self.username_field: username,
+            self.password_field: password,
             "Login": "Login"
         }
 
@@ -81,7 +91,7 @@ class BruteForceScanner:
 
     def scan(self, username="admin", delay=0.3, wordlist_path=None):
         print(f"\n{Fore.CYAN}{'='*55}")
-        print(f"{Fore.CYAN}   BRUTE-FORCE SCAN -> {self.base_url}/vulnerabilities/brute/")
+        print(f"{Fore.CYAN}   BRUTE-FORCE SCAN -> {self.brute_url}")
         print(f"{Fore.CYAN}{'='*55}\n")
 
         print(f"{Fore.BLUE}[*] Target username: '{username}'")
@@ -101,7 +111,7 @@ class BruteForceScanner:
             if body is None:
                 continue
 
-            if self.SUCCESS_INDICATOR in body:
+            if self.success_indicator in body:
                 cracked_password = password
                 print(f"{Fore.RED}[!] CREDENTIALS FOUND: '{username}':'{password}'")
                 break
@@ -122,7 +132,7 @@ class BruteForceScanner:
             self.findings.append({
                 "type":      "BRUTE_FORCE",
                 "severity":  "HIGH",
-                "url":       f"{self.base_url}/vulnerabilities/brute/",
+                "url":       self.brute_url,
                 "parameter": "username/password",
                 "method":    "get",
                 "evidence":  (
