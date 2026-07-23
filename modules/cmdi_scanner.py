@@ -12,12 +12,22 @@ class CommandInjectionScanner:
         self.findings = []
 
     def _extract_output(self, html):
+        # DVWA and many similar apps wrap command output in <pre> —
+        # try that first since it's the cleanest signal
         match = re.search(r'<pre>(.*?)</pre>', html, re.DOTALL)
         if match:
             raw = match.group(1)
             clean = re.sub(r'<[^>]+>', '\n', raw).strip()
-            return clean
-        return None
+            if clean:
+                return clean
+
+        # Fallback for targets that don't use <pre> — strip all HTML
+        # tags and return the visible text. Less precise (may include
+        # surrounding page text) but avoids false negatives on targets
+        # that render output differently than DVWA does.
+        stripped = re.sub(r'<[^>]+>', '\n', html)
+        stripped = re.sub(r'\n+', '\n', stripped).strip()
+        return stripped if stripped else None
 
     def detect(self, url, method, param_name, base_params):
         token = "CMDINJX_9f3a"
