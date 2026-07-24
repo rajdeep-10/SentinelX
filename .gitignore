@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyc
+*.egg-info/
+.Python
+env/
+venv/
+.venv/
+
+# SentinelX scan output — these contain live findings, credentials,
+# and target details from real scans. Never commit them.
+sentinelx_report_*.json
+sentinelx_report_*.txt
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editors
+.vscode/
+.idea/
+*.swp
+
+# Local config overrides (e.g. a personal target_config.py copy)
+config_local.py
