@@ -156,6 +156,8 @@ def generic_config(base_url):
         name="Generic Target",
         base_url=base_url,
         login_url=None,
+        security_level_url=None,   # not a DVWA target — no security-level concept
+        brute_url=None,            # unknown target — no assumed brute-force page either
         crawl_mode="discover",
         discover_depth=2,
     )

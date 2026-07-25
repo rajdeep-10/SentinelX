@@ -123,7 +123,8 @@ def ask_target():
         target = f"http://{target}"
 
     is_dvwa = questionary.confirm(
-        "Is this a DVWA instance? (uses known DVWA login/paths automatically)",
+        "Is this a DVWA instance? Only say yes if you're sure — it assumes "
+        "DVWA's exact login page and field names, which will fail on anything else.",
         default=False,
         style=QUESTIONARY_STYLE
     ).ask()
@@ -134,7 +135,7 @@ def ask_target():
         return cfg
 
     has_login = questionary.confirm(
-        "Do you already know a login form/URL on this target?",
+        "Does this target have a web login page you want to scan behind?",
         default=False,
         style=QUESTIONARY_STYLE
     ).ask()
@@ -142,33 +143,20 @@ def ask_target():
     if not has_login:
         return generic_config(target.rstrip("/"))
 
-    login_path = questionary.text(
-        "Login page path (e.g. /login.php or /admin/login):",
+    # No manual field-name entry — auto-detection happens later in
+    # attempt_login(), once we know the actual login page URL. For
+    # now, just remember that this target wants login attempted, and
+    # optionally where the login page is if the user knows.
+    login_hint = questionary.text(
+        "Login page path if you know it (e.g. /login.php) — leave blank "
+        "to auto-detect from the homepage:",
         style=QUESTIONARY_STYLE
     ).ask()
-    user_field = questionary.text(
-        "Username field name (check the form's HTML, e.g. 'username'):",
-        default="username", style=QUESTIONARY_STYLE
-    ).ask()
-    pass_field = questionary.text(
-        "Password field name (e.g. 'password'):",
-        default="password", style=QUESTIONARY_STYLE
-    ).ask()
 
-    return TargetConfig(
-        name="Custom Target",
-        base_url=target.rstrip("/"),
-        login_url=login_path,
-        username_field=user_field,
-        password_field=pass_field,
-        token_field=None,
-        extra_login_fields={},
-        login_success_check="text",
-        login_failure_text="incorrect",
-        security_level_url=None,
-        crawl_mode="discover",
-        discover_depth=2,
-    )
+    cfg = generic_config(target.rstrip("/"))
+    cfg.name = "Custom Target (auto-detect login)"
+    cfg._login_hint_path = login_hint or None  # used by attempt_login()
+    return cfg
 
 
 def run_recon(config):
@@ -193,9 +181,14 @@ def run_recon(config):
 
 
 def attempt_login(config):
-    """Step 3 — try to log in if config has login info. Returns a
-    logged-in Crawler, or None if login isn't configured/fails."""
-    if config.login_url is None:
+    """Step 3 — try to log in if there's a login flow for this target.
+    Handles two cases: a fully-configured target (DVWA, or anything
+    with config.login_url set) uses the existing config-driven login;
+    everything else tries auto-detection instead of asking the user
+    to type field names."""
+    has_login_intent = config.login_url is not None or config.name == "Custom Target (auto-detect login)"
+
+    if not has_login_intent:
         print(f"{Fore.YELLOW}[*] No login configured for this target — "
               f"authenticated modules will be skipped")
         return None
@@ -208,7 +201,25 @@ def attempt_login(config):
                                  style=QUESTIONARY_STYLE).ask()
 
     crawler = Crawler(config=config)
-    if not crawler.login(username=username, password=password):
+
+    if config.login_url is not None:
+        # Fully configured target (e.g. DVWA) — use the exact known flow
+        print(f"{Fore.YELLOW}[*] Using configured login at "
+              f"{config.full_url(config.login_url)}")
+        print(f"{Fore.YELLOW}    If that's wrong for this target, Ctrl+C and re-run — "
+              f"recon findings already printed above are not lost.\n")
+
+        success = crawler.login(username=username, password=password)
+    else:
+        # Auto-detect: figure out the login form's real field names
+        # from the page itself instead of asking the user to type them
+        login_hint = getattr(config, "_login_hint_path", None)
+        page_url = config.full_url(login_hint) if login_hint else config.base_url
+
+        print(f"{Fore.BLUE}[*] Auto-detecting login form at {page_url}...")
+        success = crawler.login_auto(username, password, page_url=page_url)
+
+    if not success:
         print(f"{Fore.RED}[-] Login failed — authenticated modules will be skipped")
         print(f"{Fore.YELLOW}    (recon findings above are still valid and saved)")
         return None

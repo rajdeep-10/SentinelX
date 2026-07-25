@@ -26,8 +26,17 @@ class BruteForceScanner:
         self.config = config
         self.findings = []
 
-        if config is not None:
+        if config is not None and config.brute_url is not None:
             self.brute_url = config.full_url(config.brute_url)
+            self.username_field = config.brute_username_field
+            self.password_field = config.brute_password_field
+            self.success_indicator = config.brute_success_text
+        elif config is not None:
+            # config given but no brute_url set (e.g. a generic/unknown
+            # target) — fall back to base_url; the caller (main.py) is
+            # expected to ask the user for the actual login page in
+            # this case since it genuinely can't be guessed
+            self.brute_url = self.base_url
             self.username_field = config.brute_username_field
             self.password_field = config.brute_password_field
             self.success_indicator = config.brute_success_text

@@ -36,6 +36,168 @@ class Crawler:
         self.visited_urls = set()
 
     # ─────────────────────────────────────────────
+    # AUTO-DETECT LOGIN — inspects a page for a login form and
+    # extracts its real field names automatically. This is what
+    # removes the need to hand-write a TargetConfig for a new
+    # target: point this at any URL with a login form and it
+    # figures out the field names itself.
+    # ─────────────────────────────────────────────
+    def detect_login_form(self, page_url=None):
+        """
+        Fetches page_url (or self.base_url if not given), finds the
+        first <form> containing a password-type input, and returns
+        a dict describing it: {form_url, method, username_field,
+        password_field, token_field, extra_fields} — or None if no
+        login-shaped form is found on that page.
+
+        This does NOT know your actual username/password — only the
+        form's structure. You still supply real credentials, same as
+        typing them into a browser yourself.
+        """
+        url = page_url or self.base_url
+
+        try:
+            resp = self.session.get(url, timeout=10)
+        except requests.exceptions.RequestException as e:
+            print(f"{Fore.RED}[-] Could not fetch {url} to detect a login form: {e}")
+            return None
+
+        soup = BeautifulSoup(resp.text, "html.parser")
+
+        for form in soup.find_all("form"):
+            password_input = form.find("input", {"type": "password"})
+            if not password_input:
+                continue
+
+            password_field = password_input.get("name")
+            if not password_field:
+                continue
+
+            # Username field: first text/email input in the same form
+            username_input = form.find("input", {"type": ["text", "email"]})
+            if not username_input or not username_input.get("name"):
+                # Some login forms omit type="text" (defaults to text) —
+                # fall back to the first input with a name that isn't
+                # the password field and isn't a hidden csrf-looking field
+                for inp in form.find_all("input"):
+                    name = inp.get("name")
+                    itype = inp.get("type", "text")
+                    if name and name != password_field and itype not in ("submit", "hidden"):
+                        username_input = inp
+                        break
+
+            if not username_input or not username_input.get("name"):
+                continue  # can't find a username-shaped field, not a usable login form
+
+            username_field = username_input.get("name")
+
+            # Any hidden field is treated as a token/extra field to carry
+            # through automatically (CSRF tokens, etc.)
+            token_field = None
+            extra_fields = {}
+            for inp in form.find_all("input", {"type": "hidden"}):
+                name = inp.get("name")
+                if not name:
+                    continue
+                if token_field is None:
+                    token_field = name  # first hidden field, refreshed at login time
+                else:
+                    extra_fields[name] = inp.get("value", "")
+
+            # <select> dropdowns need a value too, or the form submission
+            # is incomplete (e.g. bWAPP's security_level dropdown) — send
+            # the first <option>'s value as a sane default
+            for select in form.find_all("select"):
+                name = select.get("name")
+                if not name:
+                    continue
+                first_option = select.find("option")
+                if first_option is not None:
+                    extra_fields[name] = first_option.get("value", first_option.text.strip())
+
+            # Submit control — some forms use <input type="submit">,
+            # others use <button type="submit"> (bWAPP does the latter)
+            submit = form.find("input", {"type": "submit"}) or form.find("button", {"type": "submit"})
+            if submit and submit.get("name"):
+                extra_fields[submit.get("name")] = submit.get("value", "Submit")
+
+            action = form.get("action", "")
+            form_url = urljoin(url, action) if action else url
+            method = form.get("method", "post").lower()
+
+            print(f"{Fore.GREEN}[+] Detected login form at {form_url}")
+            print(f"{Fore.GREEN}    username field: '{username_field}'  "
+                  f"password field: '{password_field}'"
+                  + (f"  token field: '{token_field}'" if token_field else ""))
+
+            return {
+                "form_url": form_url,
+                "method": method,
+                "username_field": username_field,
+                "password_field": password_field,
+                "token_field": token_field,
+                "extra_fields": extra_fields,
+            }
+
+        print(f"{Fore.YELLOW}[?] No login form with a password field found on {url}")
+        return None
+
+    def login_auto(self, username, password, page_url=None):
+        """
+        Detects a login form on page_url (or self.base_url), then
+        logs in using whatever field names it found — no TargetConfig
+        needed for this target's login flow. Returns True/False.
+        """
+        detected = self.detect_login_form(page_url)
+        if detected is None:
+            return False
+
+        login_data = {
+            detected["username_field"]: username,
+            detected["password_field"]: password,
+        }
+        login_data.update(detected["extra_fields"])
+
+        csrf_value = None
+        if detected["token_field"]:
+            # Re-fetch to get a fresh token value (forms often rotate
+            # tokens per-request, so the one from detect isn't safe to reuse)
+            try:
+                resp = self.session.get(page_url or self.base_url, timeout=10)
+                soup = BeautifulSoup(resp.text, "html.parser")
+                token_input = soup.find("input", {"name": detected["token_field"]})
+                if token_input:
+                    csrf_value = token_input.get("value", "")
+                    login_data[detected["token_field"]] = csrf_value
+            except requests.exceptions.RequestException:
+                pass
+
+        try:
+            if detected["method"] == "get":
+                resp = self.session.get(detected["form_url"], params=login_data, timeout=10)
+            else:
+                resp = self.session.post(detected["form_url"], data=login_data, timeout=10)
+        except requests.exceptions.RequestException as e:
+            print(f"{Fore.RED}[-] Login request failed: {e}")
+            return False
+
+        # No target-specific success string to check against — use a
+        # simple heuristic: if the response no longer contains a
+        # password field, assume login succeeded (redirected to a
+        # logged-in page). Not perfect, but works on most real apps
+        # and is honest about being a heuristic, not a guarantee.
+        still_has_password_field = 'type="password"' in resp.text or "type='password'" in resp.text
+
+        if still_has_password_field:
+            print(f"{Fore.RED}[-] Login likely failed — page still shows a password field "
+                  f"(wrong credentials, or this app needs manual verification)")
+            return False
+
+        print(f"{Fore.GREEN}[+] Login appears successful (no password field in response)")
+        self.logged_in = True
+        return True
+
+    # ─────────────────────────────────────────────
     # LOGIN — uses config's field names/URL, falls back
     # to "no login needed" if config.login_url is None
     # ─────────────────────────────────────────────
@@ -185,6 +347,9 @@ class Crawler:
                 links.append(full_link)
 
         return links
+
+
+
 
     # ─────────────────────────────────────────────
     # DISCOVERY MODE — real link-following crawl for
