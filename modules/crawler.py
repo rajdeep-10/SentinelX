@@ -1,6 +1,6 @@
 import requests
 from bs4 import BeautifulSoup
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin, urlparse, parse_qs
 from colorama import Fore, init
 
 from config import DVWA_CONFIG
@@ -307,6 +307,27 @@ class Crawler:
         soup = BeautifulSoup(resp.text, "html.parser")
         forms_on_page = []
 
+        # URL query-string parameters, sqlmap-style: any link like
+        # page.php?id=1 is itself a scannable target, independent of
+        # whether the page also has an HTML <form>. This is what lets
+        # SentinelX test parameters on pages that take input purely via
+        # GET (e.g. test.php?file=..., page.php?id=...) without needing
+        # a form or a login — same as `sqlmap -u "url?param=value"`.
+        parsed_self = urlparse(url)
+        if parsed_self.query:
+            qs_params = parse_qs(parsed_self.query)
+            if qs_params:
+                base_no_query = url.split("?")[0]
+                forms_on_page.append({
+                    "action": base_no_query,
+                    "method": "get",
+                    "inputs": [
+                        {"name": name, "type": "text", "value": vals[0] if vals else ""}
+                        for name, vals in qs_params.items()
+                    ],
+                    "source": "url_param"  # distinguishes from a real <form>
+                })
+
         for form in soup.find_all("form"):
             action = form.get("action", "")
             full_action_url = urljoin(url, action) if action else url
@@ -356,7 +377,138 @@ class Crawler:
     # unknown targets (VulnHub/CTF boxes), no fixed
     # page list required
     # ─────────────────────────────────────────────
-    def crawl_discover(self, depth=2):
+    # Common parameter names worth probing on any page that took no
+    # query string of its own — this is what catches something like
+    # test.php?file=... when nothing links to it with that parameter
+    # already attached. Not exhaustive (that's what dedicated param
+    # fuzzers like Arjun/ParamSpider are for), but catches the most
+    # common real-world cases without needing prior knowledge of the
+    # target's parameter names.
+    COMMON_PARAM_NAMES = [
+        "id", "file", "page", "path", "view", "cat", "category",
+        "search", "q", "query", "name", "user", "username", "url",
+        "redirect", "next", "return", "dir", "doc", "document",
+    ]
+
+    def probe_common_params(self, url):
+        """For a page with no query string, try each common param
+        name with a unique marker and check whether that exact
+        marker gets reflected back. Before trusting this signal at
+        all, first check with a parameter name that cannot possibly
+        be real (a long random string) — if ITS marker also gets
+        reflected, the page echoes back whatever you send it
+        regardless of parameter name (e.g. a debug $_GET dump), and
+        no marker-reflection signal from this page can be trusted at
+        all. In that case, we correctly report nothing rather than
+        every parameter."""
+        fake_param = "zzz_definitely_not_a_real_param_9f3a"
+        fake_marker = "sxfakecheck9f3a"
+
+        try:
+            fake_resp = self.session.get(url, params={fake_param: fake_marker}, timeout=10)
+        except requests.exceptions.RequestException:
+            return []
+
+        if fake_marker in fake_resp.text:
+            # This page echoes ANY parameter's value regardless of
+            # name — marker reflection can't distinguish real params
+            # from fake ones here, so don't report any as "found"
+            return []
+
+        found_params = []
+        for i, param in enumerate(self.COMMON_PARAM_NAMES):
+            marker = f"sx{i:03d}q7z9f3a"
+            try:
+                resp = self.session.get(url, params={param: marker}, timeout=10)
+            except requests.exceptions.RequestException:
+                continue
+
+            if marker in resp.text:
+                found_params.append(param)
+
+        return found_params
+
+    # Small built-in fallback wordlist for path brute-forcing when no
+    # external wordlist is given — covers common real-world names so
+    # this still finds something with zero setup. For a real engagement,
+    # pass a real wordlist (e.g. dirb's common.txt) instead.
+    BUILTIN_PATH_WORDLIST = [
+        "admin", "login", "test", "config", "backup", "uploads", "upload",
+        "images", "img", "css", "js", "api", "panel", "dashboard",
+        "user", "users", "account", "profile", "settings", "search",
+        "add", "edit", "delete", "view", "show", "list", "index",
+        "home", "about", "contact", "info", "help", "docs", "download",
+        "file", "files", "data", "db", "database", "sql", "phpmyadmin",
+        "wp-admin", "wp-login", "administrator", "manage", "manager",
+        "console", "debug", "dev", "staging", "old", "bak", "tmp",
+        "temp", "log", "logs", "error", "errors", "auth", "register",
+        "signup", "reset", "forgot", "logout", "session", "token",
+        "c", "in", "out", "go", "redirect", "include", "inc",
+    ]
+
+    def brute_force_paths(self, wordlist_path=None, extensions=None):
+        """Probes common (or wordlist-supplied) paths to find pages
+        that aren't linked anywhere — e.g. test.php on a CTF box.
+        Same purpose as gobuster/dirb, built in so recon finds these
+        on its own. Returns [(path, status_code), ...] for non-404s."""
+        extensions = extensions or ["", ".php", ".html", ".txt"]
+
+        if wordlist_path:
+            try:
+                with open(wordlist_path, "r", encoding="utf-8", errors="ignore") as f:
+                    words = [line.strip() for line in f if line.strip()]
+            except FileNotFoundError:
+                print(f"{Fore.YELLOW}[!] Wordlist not found: {wordlist_path} — "
+                      f"using small built-in list instead")
+                words = self.BUILTIN_PATH_WORDLIST
+        else:
+            words = self.BUILTIN_PATH_WORDLIST
+
+        print(f"{Fore.BLUE}[*] Brute-forcing paths ({len(words)} words x "
+              f"{len(extensions)} extension(s) = {len(words) * len(extensions)} requests)...")
+
+        found_paths = []
+        for word in words:
+            for ext in extensions:
+                candidate = f"{word}{ext}"
+                url = f"{self.base_url}/{candidate}"
+                try:
+                    resp = self.session.get(url, timeout=6, allow_redirects=False)
+                except requests.exceptions.RequestException:
+                    continue
+
+                if resp.status_code != 404:
+                    found_paths.append((candidate, resp.status_code))
+                    print(f"{Fore.GREEN}[+] Found: /{candidate}  (HTTP {resp.status_code})")
+
+        print(f"{Fore.CYAN}[*] Path brute-force complete: {len(found_paths)} path(s) found")
+        return found_paths
+
+    def crawl_discover(self, depth=2, probe_params=True, brute_force=True, wordlist_path=None):
+        # Path brute-force FIRST — this is what finds pages like
+        # test.php that nothing links to, so link-following + param
+        # probing below have more real pages to work with
+        if brute_force:
+            found_paths = self.brute_force_paths(wordlist_path=wordlist_path)
+            for candidate, status in found_paths:
+                if status < 400:  # skip 403/401 — can't productively crawl those
+                    full_url = f"{self.base_url}/{candidate}"
+                    if full_url not in self.visited_urls:
+                        self.crawl_page(candidate)
+                        if probe_params:
+                            found_params = self.probe_common_params(full_url)
+                            if found_params:
+                                print(f"{Fore.GREEN}[+] {full_url} accepts "
+                                      f"parameter(s): {', '.join(found_params)}")
+                                self.discovered_forms.setdefault(full_url, [])
+                                self.discovered_forms[full_url].append({
+                                    "action": full_url,
+                                    "method": "get",
+                                    "inputs": [{"name": p, "type": "text", "value": "1"}
+                                               for p in found_params],
+                                    "source": "param_probe"
+                                })
+
         to_visit = [(self.base_url, 0)]
         visited_for_bfs = set()
 
@@ -369,6 +521,22 @@ class Crawler:
 
             path = url.replace(self.base_url, "").lstrip("/")
             links = self.crawl_page(path)
+
+            # If this page had no query string of its own, probe it
+            # for common hidden parameters (e.g. test.php with no
+            # visible ?file= anywhere, but the page actually uses one)
+            if probe_params and "?" not in url:
+                found = self.probe_common_params(url)
+                if found:
+                    print(f"{Fore.GREEN}[+] {url} accepts parameter(s) not "
+                          f"visible in any link: {', '.join(found)}")
+                    self.discovered_forms.setdefault(url, [])
+                    self.discovered_forms[url].append({
+                        "action": url,
+                        "method": "get",
+                        "inputs": [{"name": p, "type": "text", "value": "1"} for p in found],
+                        "source": "param_probe"
+                    })
 
             if current_depth < depth:
                 for link in links:

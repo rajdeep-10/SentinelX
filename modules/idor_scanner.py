@@ -22,12 +22,24 @@ class IDORScanner:
         self.config = config
         self.findings = []
 
-        if config is not None and config.idor_direct_url:
-            self.direct_url = config.full_url(config.idor_direct_url)
-            self.direct_param = config.idor_direct_param
-            self.direct_id_range = config.idor_id_range
+        if config is not None:
+            if config.idor_direct_url:
+                self.direct_url = config.full_url(config.idor_direct_url)
+                self.direct_param = config.idor_direct_param
+                self.direct_id_range = config.idor_id_range
+            else:
+                # A real config was given (DVWA or custom) but it has no
+                # direct-test target configured — don't run the direct
+                # test at all rather than silently falling back to
+                # DVWA's specific page, which would be wrong on any
+                # other target
+                self.direct_url = None
+                self.direct_param = None
+                self.direct_id_range = []
         else:
-            # Backward-compatible DVWA default
+            # No config given at all (old-style call, e.g. standalone
+            # test scripts) — keep the original DVWA default for
+            # backward compatibility
             self.direct_url = f"{self.base_url}/vulnerabilities/sqli/"
             self.direct_param = "id"
             self.direct_id_range = ["1", "2", "3", "4", "5"]
@@ -191,10 +203,11 @@ class IDORScanner:
                     continue
 
         if not self.findings:
-            print(f"{Fore.YELLOW}[?] No clear IDOR findings from form parameters")
-            print(f"{Fore.YELLOW}    DVWA's design doesn't expose clean IDOR via forms —")
-            print(f"{Fore.YELLOW}    the SQLi page's ?id= parameter is the closest analog")
-            print(f"{Fore.YELLOW}    (unauthorized data access is better demonstrated via SQLi extraction)")
+            print(f"{Fore.YELLOW}[?] No clear IDOR findings")
+            if self.direct_url and "vulnerabilities/sqli" in self.direct_url:
+                print(f"{Fore.YELLOW}    DVWA's design doesn't expose clean IDOR via forms —")
+                print(f"{Fore.YELLOW}    the SQLi page's ?id= parameter is the closest analog")
+                print(f"{Fore.YELLOW}    (unauthorized data access is better demonstrated via SQLi extraction)")
 
         print(f"\n{Fore.CYAN}[*] IDOR scan complete: {len(self.findings)} finding(s)")
         return self.findings
