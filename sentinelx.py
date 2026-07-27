@@ -50,11 +50,10 @@ import sys
 import json
 import argparse
 from datetime import datetime
-from urllib.parse import urlparse, parse_qs
 
 from colorama import Fore, init as colorama_init
 
-from config import TargetConfig, DVWA_CONFIG, generic_config
+from config import TargetConfig, DVWA_CONFIG, generic_config, SEVERITY_WEIGHT
 from modules.crawler import Crawler
 from modules.misconfig_scanner import MisconfigScanner
 from modules.sqli_scanner import SQLiScanner
@@ -66,10 +65,47 @@ from modules.csrf_scanner import CSRFScanner
 from modules.file_upload import FileUploadScanner
 from modules.idor_scanner import IDORScanner
 from modules.brute_scanner import BruteForceScanner
+from urllib.parse import urlparse, parse_qs
+from typing import Any
+
+def _build_targeted_form(url: str, param_name: str | None, method: str, data_str: str | None, default_val: str) -> tuple:
+    """Build a single-form structure for targeted parameter testing (sqlmap-style).
+    
+    Returns (session, discovered_forms) or raises SystemExit if no parameter given.
+    """
+    import requests
+        
+    parsed = urlparse(url)
+    base_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+    url_params = {k: v[0] for k, v in parse_qs(parsed.query).items()}
+    
+    extra_params: dict[str, str] = {}
+    if data_str:
+        for pair in data_str.split("&"):
+            if "=" in pair:
+                k, v = pair.split("=", 1)
+                extra_params[k] = v
+    
+    all_params = {**url_params, **extra_params}
+    name = param_name or (next(iter(url_params.keys()), None))
+    
+    if not name:
+        print("[-] No parameter to test -- pass ?param=value in -u, or use --param NAME --data 'param=value'")
+        sys.exit(1)
+    
+    if name not in all_params:
+        all_params[name] = default_val
+    
+    session = requests.Session()
+    form = {
+        "action": base_url,
+        "method": method,
+        "inputs": [{"name": k, "type": "text", "value": v} for k, v in all_params.items()]
+    }
+    discovered_forms = {base_url: [form]}
+    return session, discovered_forms
 
 colorama_init(autoreset=True)
-
-SEVERITY_WEIGHT = {"CRITICAL": 10, "HIGH": 5, "MEDIUM": 2, "LOW": 1}
 
 
 def build_parser():
@@ -154,24 +190,6 @@ def build_config(args):
     return cfg
 
 
-def parse_target_url(url):
-    """Split a URL like http://target/page.php?id=1 into base and params,
-    the way sqlmap's -u flag works."""
-    parsed = urlparse(url)
-    base = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
-    params = {k: v[0] for k, v in parse_qs(parsed.query).items()}
-    return base, params
-
-
-def parse_data_string(data_str):
-    result = {}
-    if not data_str:
-        return result
-    for pair in data_str.split("&"):
-        if "=" in pair:
-            k, v = pair.split("=", 1)
-            result[k] = v
-    return result
 
 
 def run_recon(config, quiet):

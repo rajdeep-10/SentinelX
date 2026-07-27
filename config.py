@@ -38,37 +38,42 @@ CONFIG CHANGES (documented honestly, not hidden):
 """
 
 
+from typing import Optional
+
+SEVERITY_WEIGHT: dict[str, int] = {"CRITICAL": 10, "HIGH": 5, "MEDIUM": 2, "LOW": 1}
+
+
 class TargetConfig:
     def __init__(
         self,
-        name="DVWA",
-        base_url="http://127.0.0.1",
+        name: str = "DVWA",
+        base_url: str = "http://127.0.0.1",
         # --- login (leave login_url as None if target has no login) ---
-        login_url="/login.php",
-        username_field="username",
-        password_field="password",
-        token_field="user_token",          # CSRF token field name on login form, or None
-        extra_login_fields=None,           # dict of any additional required fields, e.g. {"Login": "Login"}
-        login_success_check="cookie",      # "cookie" (session cookie set) or "text" (string appears on success)
-        login_success_text=None,           # required if login_success_check == "text"
-        login_failure_text="Login failed",
+        login_url: str | None = "/login.php",
+        username_field: str = "username",
+        password_field: str = "password",
+        token_field: str | None = "user_token",          # CSRF token field name on login form, or None
+        extra_login_fields: dict[str, str] | None = None,  # dict of any additional required fields
+        login_success_check: str = "cookie",      # "cookie" (session cookie set) or "text" (string appears on success)
+        login_success_text: str | None = None,    # required if login_success_check == "text"
+        login_failure_text: str = "Login failed",
         # --- security level (DVWA-specific, ignored for other targets) ---
-        security_level_url="/security.php",
-        security_level_field="security",
+        security_level_url: str | None = "/security.php",
+        security_level_field: str = "security",
         # --- crawling ---
-        crawl_mode="fixed",                # "fixed" = use fixed_pages list, "discover" = follow links from base_url
-        fixed_pages=None,                  # list of relative paths to crawl (used when crawl_mode == "fixed")
-        discover_depth=2,                  # link-following depth when crawl_mode == "discover"
+        crawl_mode: str = "fixed",                # "fixed" = use fixed_pages list, "discover" = follow links from base_url
+        fixed_pages: list[str] | None = None,     # list of relative paths to crawl (used when crawl_mode == "fixed")
+        discover_depth: int = 2,                  # link-following depth when crawl_mode == "discover"
         # --- brute force page ---
-        brute_url="/vulnerabilities/brute/",
-        brute_username_field="username",
-        brute_password_field="password",
-        brute_success_text="Welcome to the password protected area",
-        brute_failure_text="Username and/or password incorrect",
+        brute_url: str | None = "/vulnerabilities/brute/",
+        brute_username_field: str = "username",
+        brute_password_field: str = "password",
+        brute_success_text: str = "Welcome to the password protected area",
+        brute_failure_text: str = "Username and/or password incorrect",
         # --- known IDOR-style target page (optional, used by idor_scanner's direct test) ---
-        idor_direct_url=None,
-        idor_direct_param="id",
-        idor_id_range=None,
+        idor_direct_url: str | None = None,
+        idor_direct_param: str = "id",
+        idor_id_range: list[str] | None = None,
     ):
         self.name = name
         self.base_url = base_url.rstrip("/")
@@ -99,7 +104,7 @@ class TargetConfig:
         self.idor_direct_param = idor_direct_param
         self.idor_id_range = idor_id_range or []
 
-    def full_url(self, path):
+    def full_url(self, path: str) -> str:
         if path.startswith("http"):
             return path
         return f"{self.base_url}/{path.lstrip('/')}"

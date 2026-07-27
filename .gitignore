@@ -2,16 +2,31 @@
 __pycache__/
 *.py[cod]
 *.pyc
+*.pyo
 *.egg-info/
+*.egg
+.eggs/
+dist/
+build/
 .Python
 env/
 venv/
 .venv/
+lib/
+lib64/
 
 # SentinelX scan output — these contain live findings, credentials,
 # and target details from real scans. Never commit them.
 sentinelx_report_*.json
 sentinelx_report_*.txt
+
+# Testing / coverage
+.pytest_cache/
+.coverage
+coverage/
+htmlcov/
+.mypy_cache/
+.ruff_cache/
 
 # OS
 .DS_Store
@@ -21,6 +36,11 @@ Thumbs.db
 .vscode/
 .idea/
 *.swp
+*.swo
+*~
 
 # Local config overrides (e.g. a personal target_config.py copy)
 config_local.py
+
+# Logs
+*.log
