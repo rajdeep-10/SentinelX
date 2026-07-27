@@ -28,7 +28,7 @@ import questionary
 from questionary import Style
 from colorama import Fore, init as colorama_init
 
-from config import TargetConfig, DVWA_CONFIG, generic_config
+from config import TargetConfig, DVWA_CONFIG, generic_config, SEVERITY_WEIGHT
 from modules.crawler import Crawler
 from modules.misconfig_scanner import MisconfigScanner
 from modules.sqli_scanner import SQLiScanner
@@ -73,8 +73,6 @@ MODULE_CHOICES = [
     {"name": "idor",     "label": "IDOR",                 "severity": "HIGH"},
     {"name": "brute",    "label": "Brute Force Login",    "severity": "HIGH"},
 ]
-
-SEVERITY_WEIGHT = {"CRITICAL": 10, "HIGH": 5, "MEDIUM": 2, "LOW": 1}
 
 
 def print_banner():
