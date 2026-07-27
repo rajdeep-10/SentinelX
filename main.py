@@ -174,7 +174,15 @@ def run_recon(config):
     print(f"\n{Fore.BLUE}[*] Running discovery crawl (unauthenticated)...")
     unauth_forms = {}
     if config.crawl_mode == "discover":
-        session_crawler.crawl_discover(depth=config.discover_depth)
+        path_wordlist = None
+        if config.name != "DVWA":
+            path_wordlist = questionary.text(
+                "Wordlist for path discovery (leave blank for small built-in "
+                "list, or give a real one e.g. /usr/share/wordlists/dirb/common.txt):",
+                style=QUESTIONARY_STYLE
+            ).ask()
+        session_crawler.crawl_discover(depth=config.discover_depth,
+                                        wordlist_path=path_wordlist or None)
         unauth_forms = session_crawler.discovered_forms
 
     return misconfig_findings, unauth_forms
@@ -352,13 +360,64 @@ def run_selected_modules(crawler, selected, mode, config):
 
         if "brute" in selected:
             section("BRUTE FORCE")
+
+            # Find a real login-shaped form among what was discovered —
+            # same approach as CSRF/IDOR reusing real crawl data, instead
+            # of guessing at the base URL when no config is set up
+            login_form_url = None
+            login_form = None
+            for url, form_list in forms.items():
+                for f in form_list:
+                    has_password_field = any(
+                        i.get("type") == "password" for i in f["inputs"]
+                    )
+                    if has_password_field:
+                        login_form_url = f["action"]
+                        login_form = f
+                        break
+                if login_form:
+                    break
+
+            if login_form:
+                user_field = next(
+                    (i["name"] for i in login_form["inputs"]
+                     if i.get("type") in ("text", "email") and i["name"] not in
+                     [x["name"] for x in login_form["inputs"] if x.get("type") == "password"]),
+                    "username"
+                )
+                pass_field = next(
+                    (i["name"] for i in login_form["inputs"] if i.get("type") == "password"),
+                    "password"
+                )
+                print(f"{Fore.GREEN}[+] Using discovered login form: {login_form_url}")
+                print(f"{Fore.GREEN}    username field: '{user_field}'  password field: '{pass_field}'")
+            else:
+                login_form_url = None
+                user_field = config.brute_username_field if config.brute_url else "username"
+                pass_field = config.brute_password_field if config.brute_url else "password"
+                print(f"{Fore.YELLOW}[!] No login form found in the crawl — brute-force "
+                      f"may not target a real login endpoint")
+
             wordlist_path = questionary.text(
                 "Wordlist path (leave blank for built-in list):",
                 style=QUESTIONARY_STYLE
             ).ask()
-            scanner = BruteForceScanner(crawler.session, base_url=config.base_url, config=config)
             username = questionary.text("Username to brute-force:", default="admin",
                                          style=QUESTIONARY_STYLE).ask()
+            success_text = questionary.text(
+                "Text that appears on a SUCCESSFUL login (check a real login "
+                "response first — this can't be guessed reliably):",
+                style=QUESTIONARY_STYLE
+            ).ask()
+
+            scanner = BruteForceScanner(crawler.session, base_url=config.base_url, config=config)
+            if login_form_url:
+                scanner.brute_url = login_form_url
+            scanner.username_field = user_field
+            scanner.password_field = pass_field
+            if success_text:
+                scanner.success_indicator = success_text
+
             findings = scanner.scan(username=username, wordlist_path=wordlist_path or None)
             all_findings.extend(findings)
 
